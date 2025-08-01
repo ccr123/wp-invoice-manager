@@ -18,6 +18,7 @@ class WPIM_Invoice_Manager {
         add_action('admin_post_wpim_download_invoice', array($this, 'handle_download_invoice_pdf'));
         add_action('admin_post_wpim_mark_invoice_paid', array($this, 'handle_mark_invoice_paid'));
         add_action('pre_get_posts', array($this, 'handle_columns_sorting'));
+        add_action('wp_ajax_wpim_invoice_filter', array($this, 'wpim_invoice_filter'));
     }
 
     public function register_invoice_post_type() {
@@ -92,6 +93,7 @@ class WPIM_Invoice_Manager {
 
     // Add custom bulk actions
     public function add_bulk_actions($bulk_actions) {
+        $bulk_actions['mark_as_draft'] = 'Draft';
         $bulk_actions['mark_as_sent'] = 'Sent';
         $bulk_actions['mark_as_paid'] = 'Paid';
         return $bulk_actions;
@@ -371,9 +373,13 @@ class WPIM_Invoice_Manager {
      // Enqueue invoice.js from theme directory
     public function enqueue_invoice_js($hook) {
         global $post_type;
-        if (($hook === 'post-new.php' || $hook === 'post.php') && $post_type === self::INVOICE) {
+        if (($hook === 'post-new.php' || $hook === 'post.php') || $post_type === self::INVOICE) {
             $plugin_dir = plugin_dir_url(__FILE__);
             wp_enqueue_script('wpim-invoice-js', $plugin_dir . 'js/invoice.js', array('jquery'), null, true);
+            wp_localize_script('wpim-invoice-js', 'wpimInvoiceFilter', array(
+                'ajaxurl' => admin_url('admin-ajax.php'),
+                'nonce' => wp_create_nonce('wpim_invoice_filter_nonce')
+            ));
         }
     }
 
@@ -408,4 +414,50 @@ class WPIM_Invoice_Manager {
             }
         }
     }
+
+    // Add AJAX search/filter for invoices by number, client, or status
+    function wpim_invoice_filter(){
+        check_ajax_referer('wpim_invoice_filter_nonce', 'nonce');
+        $keyword = isset($_POST['keyword']) ? sanitize_text_field($_POST['keyword']) : '';
+        $args = array(
+            'post_type' => WPIM_Invoice_Manager::INVOICE,
+            'posts_per_page' => 20,
+            'meta_query' => array('relation' => 'OR'),
+        );
+        if ($keyword !== '') {
+            $args['meta_query'][] = array(
+                'key' => 'invoice_number',
+                'value' => $keyword,
+                'compare' => 'LIKE'
+            );
+            $args['meta_query'][] = array(
+                'key' => 'client_name',
+                'value' => $keyword,
+                'compare' => 'LIKE'
+            );
+            $args['meta_query'][] = array(
+                'key' => 'status',
+                'value' => $keyword,
+                'compare' => 'LIKE'
+            );
+        }
+        $query = new WP_Query($args);
+        $results = array();
+        foreach ($query->posts as $post) {
+            $results[] = array(
+                'id' => $post->ID,
+                'invoice_number' => get_post_meta($post->ID, 'invoice_number', true),
+                'client_name' => get_post_meta($post->ID, 'client_name', true),
+                'issue_date' => get_post_meta($post->ID, 'issue_date', true),
+                'due_date' => get_post_meta($post->ID, 'due_date', true),
+                'amount' => get_post_meta($post->ID, 'amount', true),
+                'status' => get_post_meta($post->ID, 'status', true),
+                // Always use admin-post handler for download
+                'pdf_url' => admin_url('admin-post.php?action=wpim_download_invoice&post_id=' . $post->ID),
+                'date' => get_the_date('Y-m-d', $post),
+            );
+        }
+        wp_send_json_success($results);
+    }
 }
+
